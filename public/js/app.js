@@ -25,7 +25,8 @@ mermaid.initialize({ startOnLoad: false, theme: 'default' });
 // --- 2. Slash Command Configuration ---
 const commandPalette = document.getElementById('commandPalette');
 let activeInput = null; // Tracks which textarea is typing
-let slashIndex = -1;    // Tracks where the '/' was typed
+let slashIndex = -1;
+let savedCursorPos = -1;    
 
 const advancedCommands = [
     { id: 'h1', icon: 'heading-1', label: 'Heading 1', text: '# ' },
@@ -80,39 +81,40 @@ function showPalette(rect, query) {
     lucide.createIcons();
 }
 
-function hidePalette() {
+function hidePalette(resetVariables = true) {
     commandPalette.classList.add('hidden');
-    slashIndex = -1;
-    activeInput = null;
+    if (resetVariables) {
+        slashIndex = -1;
+        activeInput = null;
+        savedCursorPos = -1;
+    }
 }
 
 function applyCommand(cmd) {
     if (!activeInput) return;
     
-    // 1. Intercept the Badge Command to show the modal
+    // Save the current cursor position before we lose focus to the modal
+    savedCursorPos = activeInput.selectionStart;
+
     if (cmd.text === 'TRIGGER_MODAL') {
-        hidePalette();
+        hidePalette(false); // <--- PASS FALSE (Don't reset variables yet!)
         document.getElementById('badgeModal').classList.remove('hidden');
-        return; // Stop execution here so it doesn't type anything
+        return; 
     }
 
-    // 2. Standard Command Logic (This is what likely got cut off!)
     const text = activeInput.value;
     const blockId = activeInput.getAttribute('data-block-id');
-    
     const beforeSlash = text.substring(0, slashIndex);
-    const afterCursor = text.substring(activeInput.selectionStart);
+    const afterCursor = text.substring(savedCursorPos);
     
-    // SMART FORMATTING: Force a double new-line if needed
     const needsNewline = beforeSlash.length > 0 && !beforeSlash.endsWith('\n');
     const prefix = needsNewline ? '\n\n' : '';
-    
     const newText = beforeSlash + prefix + cmd.text + afterCursor;
 
     activeInput.value = newText;
     AppState.updateBlock(blockId, newText);
     updatePreview();
-    hidePalette();
+    hidePalette(true); // Reset everything for normal commands
     
     activeInput.style.height = 'auto';
     activeInput.style.height = (activeInput.scrollHeight) + 'px';
@@ -309,38 +311,27 @@ copyBtn.addEventListener('click', () => {
             copyBtn.classList.replace('border-green-600', 'border-slate-900');
             lucide.createIcons();
         }, 2000);
-        }).catch(err => {   // <--- ADD THE CATCH RIGHT HERE
+        }).catch(err => {   
         console.error("Clipboard write failed:", err);
         alert("Oops! Your browser blocked clipboard access. You can still highlight the raw markdown to copy it.");
     });
 });
-// NEW: Bulletproof Export to PDF Logic (Z-Index Clone Method)
+// NEW: The "Silver Bullet" PDF Export Logic
 const pdfBtn = document.getElementById('pdfBtn');
 pdfBtn.addEventListener('click', () => {
     if (typeof html2pdf === 'undefined') {
-        alert("The PDF engine is still loading or was blocked by your browser. Try refreshing the page.");
+        alert("The PDF engine is still loading. Please wait a moment.");
         return;
     }
 
-    const originalElement = document.getElementById('visualPreview');
+    const element = document.getElementById('visualPreview');
     
-    // 1. Create a temporary container
-    const printContainer = document.createElement('div');
-    printContainer.innerHTML = originalElement.innerHTML;
-    printContainer.className = 'preview-content'; 
-    
-    // 2. THE FIX: Place it at 0,0 but hide it BEHIND the main application
-    printContainer.style.position = 'absolute';
-    printContainer.style.top = '0'; 
-    printContainer.style.left = '0';
-    printContainer.style.width = '800px'; // Standard page width
-    printContainer.style.padding = '40px';
-    printContainer.style.background = 'white';
-    printContainer.style.zIndex = '-1000'; // Hides it behind your UI
-    
-    document.body.appendChild(printContainer);
+    // 1. Loading UI
+    const originalText = pdfBtn.innerHTML;
+    pdfBtn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-indigo-600"></i> Generating...';
+    lucide.createIcons();
 
-    // 3. Lock the camera coordinates so it doesn't get confused by scrolling
+    // 2. The Configuration with the OnClone Magic
     const opt = {
         margin:       0.5,
         filename:     'MD_Studio_Export.pdf',
@@ -348,27 +339,36 @@ pdfBtn.addEventListener('click', () => {
         html2canvas:  { 
             scale: 2, 
             useCORS: true,
-            scrollX: 0, // Force camera to X: 0
-            scrollY: 0, // Force camera to Y: 0
-            windowWidth: 800 // Match container width
+            // THE SILVER BULLET: Modifying the invisible clone before the camera snaps
+            onclone: function (clonedDoc) {
+                // A. Strip the straitjacket off the cloned Body
+                clonedDoc.body.classList.remove('h-screen', 'overflow-hidden');
+                clonedDoc.body.style.height = 'max-content';
+                clonedDoc.body.style.overflow = 'visible';
+
+                // B. Find our preview inside the clone
+                const clonedPreview = clonedDoc.getElementById('visualPreview');
+                
+                // C. Walk up the HTML tree and violently remove all scrollbars and height limits
+                let parent = clonedPreview.parentElement;
+                while (parent && parent.tagName !== 'BODY') {
+                    parent.classList.remove('overflow-y-auto', 'overflow-hidden', 'flex-1', 'h-screen');
+                    parent.style.height = 'max-content';
+                    parent.style.overflow = 'visible';
+                    parent = parent.parentElement;
+                }
+            }
         },
         jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
     };
-    
-    // 4. Loading UI
-    const originalText = pdfBtn.innerHTML;
-    pdfBtn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-indigo-600"></i> Generating...';
-    lucide.createIcons();
 
-    // 5. Generate and Clean Up
-    html2pdf().set(opt).from(printContainer).save().then(() => {
-        document.body.removeChild(printContainer); 
-        pdfBtn.innerHTML = originalText; 
+    // 3. Generate and Reset
+    html2pdf().set(opt).from(element).save().then(() => {
+        pdfBtn.innerHTML = originalText;
         lucide.createIcons();
     }).catch(err => {
         console.error("PDF Engine Crash:", err);
-        alert("Failed to generate PDF. Check the console for details.");
-        document.body.removeChild(printContainer); 
+        alert("Failed to generate PDF. Check the console.");
         pdfBtn.innerHTML = originalText;
         lucide.createIcons();
     });
@@ -387,28 +387,37 @@ cancelBadgeBtn.addEventListener('click', () => {
 });
 
 insertBadgeBtn.addEventListener('click', () => {
-    if (!activeInput) return;
+    if (!activeInput || slashIndex === -1) {
+        console.error("Lost track of the input block.");
+        return;
+    }
 
     let generatedBadges = "";
     if (document.getElementById('badgeLicense').checked) generatedBadges += "![License](https://img.shields.io/badge/license-MIT-blue.svg) ";
     if (document.getElementById('badgeNpm').checked) generatedBadges += "![NPM](https://img.shields.io/badge/npm-v1.0.0-green.svg) ";
     if (document.getElementById('badgeBuild').checked) generatedBadges += "![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) ";
 
-    // Remove the '/badges' trigger text and insert the images
     const text = activeInput.value;
     const blockId = activeInput.getAttribute('data-block-id');
-    const beforeSlash = text.substring(0, slashIndex);
-    const afterCursor = text.substring(activeInput.selectionStart);
     
-    const newText = beforeSlash + generatedBadges + '\n\n' + afterCursor;
+    // Use the saved positions to swap the '/badges' text with actual images
+    const beforeSlash = text.substring(0, slashIndex);
+    const afterCursor = text.substring(savedCursorPos);
+    const newText = beforeSlash + generatedBadges + afterCursor;
 
     activeInput.value = newText;
     AppState.updateBlock(blockId, newText);
     updatePreview();
     
     badgeModal.classList.add('hidden');
+    hidePalette(true); // Now we safely reset the variables
     
     activeInput.style.height = 'auto';
     activeInput.style.height = (activeInput.scrollHeight) + 'px';
     activeInput.focus();
+});
+
+cancelBadgeBtn.addEventListener('click', () => {
+    badgeModal.classList.add('hidden');
+    hidePalette(true); // Reset on cancel too
 });
